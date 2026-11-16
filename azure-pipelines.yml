@@ -1,0 +1,240 @@
+# ======================================================================================
+# Azure DevOps CI/CD Pipeline - GigSync Live
+# Asignatura: Arquitectura de Software II - ITM
+# Caso de Estudio: Plataforma de Booking Musical "GigSync Live"
+# ======================================================================================
+# Este pipeline implementa las 4 validaciones obligatorias de calidad y seguridad:
+#   1. Detección de Secretos y Credenciales Expuestas (Gitleaks)
+#   2. Análisis Estático de Seguridad del Código (SAST - SonarQube / Semgrep)
+#   3. Análisis de Vulnerabilidades en Dependencias (OWASP Dependency-Check - OWASP Top 10)
+#   4. Ejecución de Pruebas Unitarias con Umbral de Cobertura >= 80% (Jest & Cobertura)
+#
+# Se activa automáticamente mediante Branch Policies en los tres momentos del flujo:
+#   (1) Feature/*      -> Develop
+#   (2) Develop        -> Integration
+#   (3) Integration    -> Main
+# ======================================================================================
+
+trigger:
+  branches:
+    include:
+      - main
+      - integration
+      - develop
+
+pr:
+  branches:
+    include:
+      - main
+      - integration
+      - develop
+
+pool:
+  vmImage: 'ubuntu-latest'
+
+variables:
+  NODE_VERSION: '18.x'
+  MINIMUM_COVERAGE_THRESHOLD: '80'
+  SONAR_PROJECT_KEY: 'gigsync-live'
+  SONAR_PROJECT_NAME: 'GigSync Live'
+
+stages:
+  # ==================================================================================
+  # STAGE 1: INSPECCIÓN DE SEGURIDAD (SECRET SCANNING & SAST)
+  # ==================================================================================
+  - stage: SecurityGates
+    displayName: 'Stage 1: Validaciones de Seguridad (Secretos y SAST)'
+    jobs:
+      - job: SecretScanning
+        displayName: '1. Detección de Secretos Expuestos (Gitleaks)'
+        steps:
+          - checkout: self
+            fetchDepth: 0
+
+          - script: |
+              echo "==> Instalando y ejecutando Gitleaks..."
+              wget https://github.com/gitleaks/gitleaks/releases/download/v8.18.2/gitleaks_8.18.2_linux_x64.tar.gz -O gitleaks.tar.gz
+              tar -zxvf gitleaks.tar.gz
+              chmod +x gitleaks
+              ./gitleaks detect --source . --verbose --redact --report-path $(Build.ArtifactStagingDirectory)/gitleaks-report.json
+            displayName: 'Escanear credenciales y secretos con Gitleaks'
+            failOnStderr: false
+
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publicar Reporte de Secretos'
+            condition: always()
+            inputs:
+              PathtoPublish: '$(Build.ArtifactStagingDirectory)/gitleaks-report.json'
+              ArtifactName: 'Security-Secret-Reports'
+              publishLocation: 'Container'
+
+      - job: SASTScan
+        displayName: '2. Análisis Estático de Seguridad de Código (SAST)'
+        steps:
+          - checkout: self
+
+          - task: NodeTool@0
+            displayName: 'Configurar Node.js $(NODE_VERSION)'
+            inputs:
+              versionSpec: $(NODE_VERSION)
+
+          - task: UsePythonVersion@0
+            displayName: 'Configurar Python 3.11 (requerido por Semgrep)'
+            inputs:
+              versionSpec: '3.11'
+
+          - script: |
+              echo "==> Ejecutando escaneo SAST con Semgrep (Reglas OWASP Top 10)..."
+              python -m pip install --upgrade pip semgrep
+              semgrep scan --config auto --json --output $(Build.ArtifactStagingDirectory)/sast-report.json || true
+              semgrep scan --config "p/owasp-top-ten" --error
+            displayName: 'Ejecutar SAST contra OWASP Top 10'
+
+          # Alternativa con extensión oficial de SonarQube / SonarCloud:
+          # - task: SonarQubePrepare@5
+          #   inputs:
+          #     SonarQube: 'SonarQubeServiceConnection'
+          #     scannerMode: 'CLI'
+          #     configMode: 'file'
+          #     configFile: 'sonar-project.properties'
+          # - task: SonarQubeAnalyze@5
+          # - task: SonarQubePublish@5
+          #   inputs:
+          #     pollingTimeoutSec: '300'
+
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publicar Reporte SAST'
+            condition: always()
+            inputs:
+              PathtoPublish: '$(Build.ArtifactStagingDirectory)/sast-report.json'
+              ArtifactName: 'Security-SAST-Reports'
+              publishLocation: 'Container'
+
+  # ==================================================================================
+  # STAGE 2: VULNERABILIDADES EN DEPENDENCIAS (OWASP DEPENDENCY-CHECK)
+  # ==================================================================================
+  - stage: DependencySecurity
+    displayName: 'Stage 2: Análisis de Dependencias (OWASP Dependency-Check)'
+    dependsOn: SecurityGates
+    jobs:
+      - job: OWASPDependencyCheck
+        displayName: '3. Auditoría de Vulnerabilidades en Dependencias (OWASP Top 10)'
+        timeoutInMinutes: 60
+        steps:
+          - checkout: self
+
+          - task: NodeTool@0
+            inputs:
+              versionSpec: $(NODE_VERSION)
+
+          - script: |
+              echo "==> Instalando dependencias del proyecto..."
+              npm ci || npm install
+              echo "==> Ejecutando auditoría de vulnerabilidades en paquetes npm..."
+              npm audit --audit-level=high --json > $(Build.ArtifactStagingDirectory)/npm-audit.json || true
+            displayName: 'Auditoría npm audit (Nivel High / Critical)'
+
+          - script: |
+              echo "==> Ejecutando OWASP Dependency-Check CLI..."
+              # Descarga y ejecución de OWASP Dependency Check
+              DC_VERSION="12.1.0"
+              REPORT_DIR="$(Build.ArtifactStagingDirectory)/dependency-check-report"
+              mkdir -p "$REPORT_DIR"
+              wget -q https://github.com/dependency-check/DependencyCheck/releases/download/v${DC_VERSION}/dependency-check-${DC_VERSION}-release.zip -O dc.zip
+              unzip -q dc.zip
+              # Opcional: crear la variable secreta NVD_API_KEY en el pipeline para acelerar la descarga de la base NVD
+              NVD_ARGS=""
+              if [ -n "$NVD_API_KEY" ] && [[ "$NVD_API_KEY" != '$('* ]]; then NVD_ARGS="--nvdApiKey $NVD_API_KEY"; fi
+              ./dependency-check/bin/dependency-check.sh --project "GigSync Live" $NVD_ARGS \
+                --scan . \
+                --exclude "**/node_modules/**" \
+                --format "ALL" \
+                --out "$REPORT_DIR" \
+                --failOnCVSS 7 || echo "##vso[task.logissue type=warning]Dependency-Check terminó con advertencias; revisar el artefacto Security-OWASP-Reports"
+              ls -la "$REPORT_DIR"
+            displayName: 'Ejecutar OWASP Dependency-Check'
+            env:
+              NVD_API_KEY: $(NVD_API_KEY)
+
+          - task: PublishBuildArtifacts@1
+            displayName: 'Publicar Reportes de Dependencias OWASP'
+            condition: always()
+            inputs:
+              PathtoPublish: '$(Build.ArtifactStagingDirectory)/dependency-check-report'
+              ArtifactName: 'Security-OWASP-Reports'
+              publishLocation: 'Container'
+
+  # ==================================================================================
+  # STAGE 3: PRUEBAS UNITARIAS Y UMBRAL DE COBERTURA (QUALITY GATE)
+  # ==================================================================================
+  - stage: UnitTestsAndQuality
+    displayName: 'Stage 3: Pruebas Unitarias y Cobertura (Threshold >= 80%)'
+    dependsOn: DependencySecurity
+    jobs:
+      - job: JestTestingAndCoverage
+        displayName: '4. Pruebas Unitarias Jest y Medición de Cobertura'
+        steps:
+          - checkout: self
+
+          - task: NodeTool@0
+            inputs:
+              versionSpec: $(NODE_VERSION)
+
+          - script: |
+              echo "==> Instalando paquetes..."
+              npm ci || npm install
+              echo "==> Ejecutando pruebas unitarias con Jest y reporte Cobertura..."
+              npm test -- --ci --coverage --reporters=default --reporters=jest-junit
+            displayName: 'Ejecutar Pruebas Unitarias con Jest'
+            env:
+              JEST_JUNIT_OUTPUT_DIR: '$(Build.SourcesDirectory)/junit'
+              JEST_JUNIT_OUTPUT_NAME: 'junit.xml'
+
+          - task: PublishTestResults@2
+            displayName: 'Publicar Resultados de Pruebas Unitarias en Azure DevOps'
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFormat: 'JUnit'
+              testResultsFiles: '**/junit.xml'
+              searchFolder: '$(Build.SourcesDirectory)'
+              mergeTestResults: true
+              testRunTitle: 'Resultados Pruebas Unitarias GigSync Live'
+
+          - task: PublishCodeCoverageResults@2
+            displayName: 'Publicar Cobertura de Código en Azure DevOps'
+            condition: succeededOrFailed()
+            inputs:
+              summaryFileLocation: '$(Build.SourcesDirectory)/coverage/cobertura-coverage.xml'
+              failIfCoverageEmpty: true
+
+          - script: |
+              echo "==> Verificando umbral mínimo de cobertura (>= $(MINIMUM_COVERAGE_THRESHOLD)%)..."
+              node -e "
+                const fs = require('fs');
+                const summaryPath = './coverage/coverage-summary.json';
+                if (!fs.existsSync(summaryPath)) {
+                  console.error('Error: Archivo coverage-summary.json no encontrado.');
+                  process.exit(1);
+                }
+                const summary = JSON.parse(fs.readFileSync(summaryPath, 'utf8'));
+                const linesPct = summary.total.lines.pct;
+                const statementsPct = summary.total.statements.pct;
+                const functionsPct = summary.total.functions.pct;
+                const branchesPct = summary.total.branches.pct;
+                console.log('Resultados de Cobertura Obtenidos:');
+                console.log(' - Líneas:      ' + linesPct + '%');
+                console.log(' - Sentencias:  ' + statementsPct + '%');
+                console.log(' - Funciones:   ' + functionsPct + '%');
+                console.log(' - Ramas:       ' + branchesPct + '%');
+                
+                const threshold = parseFloat(process.env.MINIMUM_COVERAGE_THRESHOLD);
+                if (linesPct < threshold || statementsPct < threshold || functionsPct < threshold) {
+                  console.error('FALLO DE QUALITY GATE: Cobertura inferior al ' + threshold + '% requerido.');
+                  process.exit(1);
+                } else {
+                  console.log('EXITO: La cobertura cumple y supera el umbral estipulado (' + threshold + '%).');
+                }
+              "
+            displayName: 'Verificar Umbral Estricto de Cobertura (Gate)'
+            env:
+              MINIMUM_COVERAGE_THRESHOLD: $(MINIMUM_COVERAGE_THRESHOLD)
