@@ -1,0 +1,146 @@
+{
+  "project": "GigSync-Live-DevOps",
+  "methodology": "Agile / Scrum",
+  "teamMembers": [
+    {
+      "name": "Sebastián Dávila",
+      "role": "Arquitecto de Software & Backend Developer",
+      "email": "sebastian.davila@correo.itm.edu.co"
+    },
+    {
+      "name": "Luisa Maria Puentes Espinosa",
+      "role": "Frontend Developer & QA Engineer",
+      "email": "luisa.puentes@correo.itm.edu.co"
+    },
+    {
+      "name": "Franco Moncayo",
+      "role": "Database Administrator & Security Engineer",
+      "email": "franco.moncayo@correo.itm.edu.co"
+    }
+  ],
+  "epics": [
+    {
+      "id": "EPIC-01",
+      "title": "Gestión Integral del Ciclo de Vida de Contratación Musical (Gig Booking Core)",
+      "description": "Orquestación segura del flujo de solicitudes, acuerdos contractuales, estados de reserva y eventos de auditoría para bandas y promotores.",
+      "features": [
+        {
+          "id": "FEAT-01",
+          "title": "Motor de Mensajería y Auditoría Transaccional con Apache Kafka",
+          "userStories": [
+            {
+              "id": "HU-01",
+              "workitemId": 1,
+              "title": "Publicación y Consumo de Eventos de Auditoría ante Transición de Estado de Reserva",
+              "assignedTo": "Sebastián Dávila",
+              "storyPoints": 8,
+              "priority": 1,
+              "description": "Como Administrador del Sistema GigSync Live, quiero que cada cambio de estado en una reserva (SOLICITADA, CONFIRMADA, PAGADA, etc.) emita un evento asíncrono a Kafka para que quede registrado en la base de datos de auditoría sin bloquear la experiencia del usuario.",
+              "acceptanceCriteria": [
+                "Dado que un organizador solicita una reserva válida, cuando el servicio la procesa, entonces se emite el evento 'BOOKING_CREATED' a Kafka.",
+                "Dado que un artista acepta o rechaza una reserva, cuando se transiciona el estado, entonces se emite 'BOOKING_STATUS_CHANGED' con el estado previo y nuevo.",
+                "Dado un fallo de conexión temporal con Kafka, el servicio no debe provocar un error 500 al cliente, registrando el error en log.",
+                "La suite de pruebas unitarias debe cubrir más del 85% de las ramas de la máquina de estados."
+              ],
+              "tasks": [
+                {
+                  "taskId": 101,
+                  "title": "Implementar clase BookingService y máquina de estados finitos",
+                  "assignedTo": "Sebastián Dávila",
+                  "estimatedHours": 6,
+                  "activity": "Development"
+                },
+                {
+                  "taskId": 102,
+                  "title": "Estructurar consumidor Kafka para persistencia en tabla logs_auditoria",
+                  "assignedTo": "Franco Moncayo",
+                  "estimatedHours": 4,
+                  "activity": "Development"
+                },
+                {
+                  "taskId": 103,
+                  "title": "Diseñar suite de pruebas unitarias Jest con mock de Kafka (cobertura >= 85%)",
+                  "assignedTo": "Luisa Maria Puentes Espinosa",
+                  "estimatedHours": 5,
+                  "activity": "Testing"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "FEAT-02",
+          "title": "Validación de Seguridad y Sanitización contra Inyecciones (OWASP Top 10)",
+          "userStories": [
+            {
+              "id": "HU-02",
+              "workitemId": 2,
+              "title": "Sanitización de Datos y Protección contra Inyecciones en Formulario de Contratación",
+              "assignedTo": "Franco Moncayo",
+              "storyPoints": 5,
+              "priority": 2,
+              "description": "Como Oficial de Seguridad de GigSync Live, quiero que las entradas de texto en contratos y ofertas sean sanitizadas para evitar ataques de SQL Injection y Cross-Site Scripting (XSS).",
+              "acceptanceCriteria": [
+                "Dado un payload con caracteres maliciosos (<script>, comillas, puntos y coma), el sistema debe neutralizarlos antes de procesar.",
+                "El análisis SAST en el pipeline no debe arrojar vulnerabilidades de severidad Alta o Crítica.",
+                "El escaneo de dependencias con OWASP Dependency-Check debe reportar 0 vulnerabilidades con CVSS >= 7."
+              ],
+              "tasks": [
+                {
+                  "taskId": 201,
+                  "title": "Implementar módulo de sanitización de inputs y validación de esquemas",
+                  "assignedTo": "Franco Moncayo",
+                  "estimatedHours": 4,
+                  "activity": "Development"
+                },
+                {
+                  "taskId": 202,
+                  "title": "Configurar escáner SAST y reglas de exclusión de secretos en pipeline",
+                  "assignedTo": "Sebastián Dávila",
+                  "estimatedHours": 3,
+                  "activity": "Security"
+                }
+              ]
+            }
+          ]
+        },
+        {
+          "id": "FEAT-03",
+          "title": "Portal Interactivo de Seguimiento de Contratos (Frontend)",
+          "userStories": [
+            {
+              "id": "HU-03",
+              "workitemId": 3,
+              "title": "Línea de Tiempo Visual del Estado de la Reserva para Artistas y Promotores",
+              "assignedTo": "Luisa Maria Puentes Espinosa",
+              "storyPoints": 5,
+              "priority": 2,
+              "description": "Como Artista o Promotor, quiero ver en tiempo real el progreso de mi contratación en una interfaz intuitiva con estados claramente diferenciados.",
+              "acceptanceCriteria": [
+                "La vista debe reflejar de forma reactiva el estado actual (Solicitada, Confirmada, Pagada, En Curso, Finalizada).",
+                "El componente debe cumplir con accesibilidad y diseño responsivo.",
+                "Las pruebas de componentes deben integrarse en el reporte de cobertura JUnit del pipeline."
+              ],
+              "tasks": [
+                {
+                  "taskId": 301,
+                  "title": "Construir componente visual BookingTimeline en React",
+                  "assignedTo": "Luisa Maria Puentes Espinosa",
+                  "estimatedHours": 6,
+                  "activity": "Design"
+                },
+                {
+                  "taskId": 302,
+                  "title": "Vincular componente con los eventos emitidos por el backend",
+                  "assignedTo": "Sebastián Dávila",
+                  "estimatedHours": 4,
+                  "activity": "Development"
+                }
+              ]
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}
