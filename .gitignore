@@ -1,0 +1,21 @@
+# Dependencies
+node_modules/
+package-lock.json
+
+# Test Coverage & Reports
+coverage/
+junit/
+*.xml
+*-report.json
+dependency-check-report/
+
+# Logs & Environment
+*.log
+.env
+.env.local
+
+# IDE & OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
