@@ -78,9 +78,14 @@ stages:
             inputs:
               versionSpec: $(NODE_VERSION)
 
+          - task: UsePythonVersion@0
+            displayName: 'Configurar Python 3.11 (requerido por Semgrep)'
+            inputs:
+              versionSpec: '3.11'
+
           - script: |
               echo "==> Ejecutando escaneo SAST con Semgrep (Reglas OWASP Top 10)..."
-              python3 -m pip install semgrep
+              python -m pip install --upgrade pip semgrep
               semgrep scan --config auto --json --output $(Build.ArtifactStagingDirectory)/sast-report.json || true
               semgrep scan --config "p/owasp-top-ten" --error
             displayName: 'Ejecutar SAST contra OWASP Top 10'
@@ -114,6 +119,7 @@ stages:
     jobs:
       - job: OWASPDependencyCheck
         displayName: '3. Auditoría de Vulnerabilidades en Dependencias (OWASP Top 10)'
+        timeoutInMinutes: 60
         steps:
           - checkout: self
 
@@ -131,16 +137,24 @@ stages:
           - script: |
               echo "==> Ejecutando OWASP Dependency-Check CLI..."
               # Descarga y ejecución de OWASP Dependency Check
-              DC_VERSION="9.0.9"
-              wget https://github.com/jeremylong/DependencyCheck/releases/download/v${DC_VERSION}/dependency-check-${DC_VERSION}-release.zip -O dc.zip
+              DC_VERSION="12.1.0"
+              REPORT_DIR="$(Build.ArtifactStagingDirectory)/dependency-check-report"
+              mkdir -p "$REPORT_DIR"
+              wget -q https://github.com/dependency-check/DependencyCheck/releases/download/v${DC_VERSION}/dependency-check-${DC_VERSION}-release.zip -O dc.zip
               unzip -q dc.zip
-              ./dependency-check/bin/dependency-check.sh --project "GigSync Live" \
+              # Opcional: crear la variable secreta NVD_API_KEY en el pipeline para acelerar la descarga de la base NVD
+              NVD_ARGS=""
+              if [ -n "$NVD_API_KEY" ] && [[ "$NVD_API_KEY" != '$('* ]]; then NVD_ARGS="--nvdApiKey $NVD_API_KEY"; fi
+              ./dependency-check/bin/dependency-check.sh --project "GigSync Live" $NVD_ARGS \
                 --scan . \
                 --exclude "**/node_modules/**" \
                 --format "ALL" \
-                --out $(Build.ArtifactStagingDirectory)/dependency-check-report \
-                --failOnCVSS 7 || true
+                --out "$REPORT_DIR" \
+                --failOnCVSS 7 || echo "##vso[task.logissue type=warning]Dependency-Check terminó con advertencias; revisar el artefacto Security-OWASP-Reports"
+              ls -la "$REPORT_DIR"
             displayName: 'Ejecutar OWASP Dependency-Check'
+            env:
+              NVD_API_KEY: $(NVD_API_KEY)
 
           - task: PublishBuildArtifacts@1
             displayName: 'Publicar Reportes de Dependencias OWASP'

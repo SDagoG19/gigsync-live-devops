@@ -1,8 +1,8 @@
+title = "Gitleaks configuration for GigSync Live"
+
 [extend]
 useDefault = true
 
-[rules]
-description = "Gitleaks configuration for GigSync Live"
 
 [[rules]]
 id = "generic-api-key"
