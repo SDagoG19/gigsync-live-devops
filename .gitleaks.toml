@@ -1,0 +1,24 @@
+[extend]
+useDefault = true
+
+[rules]
+description = "Gitleaks configuration for GigSync Live"
+
+[[rules]]
+id = "generic-api-key"
+description = "Generic API Key Detector"
+regex = '''(?i)(?:key|api|token|secret|password|app_key|app_id)[-_\s]*[=:][-_\s]*['"]([a-zA-Z0-9_\-\.]{16,})['"]'''
+secretGroup = 1
+entropy = 3.5
+
+[[rules]]
+id = "azure-devops-pat"
+description = "Azure DevOps Personal Access Token (PAT)"
+regex = '''(?i)(?:azure|devops|vsts)[-_\s]*(?:pat|token)[-_\s]*[=:][-_\s]*['"]([a-z0-9]{52})['"]'''
+secretGroup = 1
+
+[[rules]]
+id = "jwt-token"
+description = "JSON Web Token (JWT)"
+regex = '''eyJ[A-Za-z0-9-_=]+\.[A-Za-z0-9-_=]+\.?[A-Za-z0-9-_.+/=]*'''
+secretGroup = 0
