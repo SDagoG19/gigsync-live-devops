@@ -1,19 +1,26 @@
 {
   "name": "gigsync-live-devops",
   "version": "1.0.0",
-  "description": "GigSync Live Core Service - Taller 4 Arquitectura de Software II ITM",
-  "main": "src/bookingService.js",
+  "description": "GigSync Live Core Service - Guía 5 CI/CD seguro (Azure DevOps + GitHub Actions) - Arquitectura de Software II ITM",
+  "main": "src/server.js",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
+    "start": "node src/server.js",
     "test": "jest",
     "test:coverage": "jest --coverage",
-    "test:ci": "jest --ci --coverage --reporters=default --reporters=jest-junit"
+    "test:ci": "jest --ci --coverage --reporters=default --reporters=jest-junit",
+    "audit:prod": "npm audit --omit=dev --audit-level=high"
   },
   "keywords": [
     "gigsync",
     "devops",
     "azure-pipelines",
-    "sonar",
-    "owasp",
+    "github-actions",
+    "azure-app-service",
+    "owasp-dependency-check",
+    "gitleaks",
     "jest"
   ],
   "author": "Luisa Puentes, Sebastian Davila, Franco Moncayo",
@@ -24,7 +31,11 @@
   },
   "devDependencies": {
     "jest": "^29.7.0",
-    "jest-junit": "^16.0.0"
+    "jest-junit": "^17.0.0"
+  },
+  "jest-junit": {
+    "outputDirectory": "junit",
+    "outputName": "junit.xml"
   },
   "jest": {
     "testEnvironment": "node",
