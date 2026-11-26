@@ -139,6 +139,66 @@
               ]
             }
           ]
+        },
+        {
+          "id": "FEAT-04",
+          "title": "Pipeline CI/CD Seguro con Controles Automáticos (DevSecOps) - Guía 5",
+          "userStories": [
+            {
+              "id": "HU-04",
+              "workitemId": 16,
+              "title": "Integración y Despliegue Continuo con Validación Automática de Secretos y Dependencias",
+              "assignedTo": "Sebastián Dávila",
+              "storyPoints": 8,
+              "priority": 1,
+              "description": "Como Equipo de Desarrollo de GigSync Live, queremos que cada commit dispare automáticamente un pipeline CI/CD en Azure DevOps y en GitHub Actions que ejecute Gitleaks, Semgrep (SAST) y OWASP Dependency-Check, para impedir que código con secretos expuestos, código inseguro o dependencias vulnerables (CVSS >= 7) se integre o se despliegue en Azure App Service.",
+              "acceptanceCriteria": [
+                "Dado un commit en cualquier rama, cuando se publica en el repositorio, entonces se dispara automáticamente el pipeline en Azure Pipelines y en GitHub Actions.",
+                "Dado un secreto expuesto en el historial de git, cuando se ejecuta Gitleaks, entonces el pipeline falla y no se despliega.",
+                "Dada una dependencia con una vulnerabilidad CVSS >= 7, cuando se ejecuta OWASP Dependency-Check, entonces el pipeline falla y no se despliega.",
+                "Dado código con inyección SQL, de comandos o eval, cuando se ejecuta Semgrep (SAST), entonces el pipeline falla y no se despliega.",
+                "Dado que todos los controles pasan en la rama main, cuando termina el stage de pruebas, entonces se despliega en Azure App Service y el endpoint /health responde 200.",
+                "Las ramas main, integration y develop exigen que el pipeline termine en verde antes de aceptar un Pull Request."
+              ],
+              "tasks": [
+                {
+                  "taskId": 401,
+                  "title": "Crear azure-pipelines.yml con stages de seguridad, CI y CD a App Service",
+                  "assignedTo": "Sebastián Dávila",
+                  "estimatedHours": 5,
+                  "activity": "Deployment"
+                },
+                {
+                  "taskId": 402,
+                  "title": "Crear workflow .github/workflows/ci-cd.yml con Gitleaks, Semgrep y OWASP Dependency-Check",
+                  "assignedTo": "Luisa Maria Puentes Espinosa",
+                  "estimatedHours": 4,
+                  "activity": "Deployment"
+                },
+                {
+                  "taskId": 403,
+                  "title": "Definir reglas de Gitleaks y Semgrep, umbral CVSS y política de supresiones de falsos positivos",
+                  "assignedTo": "Franco Moncayo",
+                  "estimatedHours": 3,
+                  "activity": "Design"
+                },
+                {
+                  "taskId": 404,
+                  "title": "Crear Web App en Azure App Service y Service Connection del proyecto",
+                  "assignedTo": "Franco Moncayo",
+                  "estimatedHours": 2,
+                  "activity": "Deployment"
+                },
+                {
+                  "taskId": 405,
+                  "title": "Configurar Branch Policies / Branch Protection con validación obligatoria del pipeline",
+                  "assignedTo": "Luisa Maria Puentes Espinosa",
+                  "estimatedHours": 2,
+                  "activity": "Deployment"
+                }
+              ]
+            }
+          ]
         }
       ]
     }

@@ -1,24 +1,63 @@
-title = "Gitleaks configuration for GigSync Live"
+# ======================================================================================
+# Gitleaks - Configuración de detección de secretos para GigSync Live
+# Se usa en Azure Pipelines (azure-pipelines.yml) y GitHub Actions (.github/workflows/ci-cd.yml)
+#
+# Criterio de fallo: CUALQUIER secreto detectado en el historial de git hace que
+# gitleaks termine con exit code 1 y el pipeline se detenga (no hay despliegue).
+# ======================================================================================
 
+title = "GigSync Live - Gitleaks config"
+# [[allowlists]] requiere gitleaks v8.25.0 o superior (el pipeline usa v8.30.1)
+minVersion = "v8.25.0"
+
+# Hereda las 150+ reglas oficiales de gitleaks (AWS, Azure, GitHub, Slack, llaves privadas, etc.)
 [extend]
 useDefault = true
 
+# --------------------------------------------------------------------------------------
+# Reglas propias del proyecto (se suman a las reglas por defecto)
+# --------------------------------------------------------------------------------------
 
 [[rules]]
-id = "generic-api-key"
-description = "Generic API Key Detector"
-regex = '''(?i)(?:key|api|token|secret|password|app_key|app_id)[-_\s]*[=:][-_\s]*['"]([a-zA-Z0-9_\-\.]{16,})['"]'''
+id = "gigsync-hardcoded-credential"
+description = "Credencial asignada en texto plano (password/secret/token/api key)"
+regex = '''(?i)(?:password|passwd|pwd|secret|token|api[_-]?key|app[_-]?key|client[_-]?secret)["']?\s*[:=]\s*["']([^"'\s]{12,})["']'''
 secretGroup = 1
 entropy = 3.5
+keywords = ["password", "passwd", "pwd", "secret", "token", "api_key", "api-key", "apikey", "app_key", "client_secret"]
 
 [[rules]]
 id = "azure-devops-pat"
 description = "Azure DevOps Personal Access Token (PAT)"
-regex = '''(?i)(?:azure|devops|vsts)[-_\s]*(?:pat|token)[-_\s]*[=:][-_\s]*['"]([a-z0-9]{52})['"]'''
+regex = '''(?i)(?:azure|devops|ado|vsts)[\w.-]{0,20}(?:pat|token)["']?\s*[:=]\s*["']?([a-z0-9]{52}|[a-z0-9]{84})["']?'''
 secretGroup = 1
+keywords = ["azure", "devops", "ado", "vsts"]
 
 [[rules]]
-id = "jwt-token"
-description = "JSON Web Token (JWT)"
-regex = '''eyJ[A-Za-z0-9-_=]+\.[A-Za-z0-9-_=]+\.?[A-Za-z0-9-_.+/=]*'''
-secretGroup = 0
+id = "mysql-connection-uri"
+description = "URI de conexión MySQL con usuario y contraseña embebidos"
+regex = '''mysql://[^:\s/]+:([^@\s]{4,})@[^\s"']+'''
+secretGroup = 1
+keywords = ["mysql://"]
+
+[[rules]]
+id = "kafka-sasl-password"
+description = "Contraseña SASL de Apache Kafka en texto plano"
+regex = '''(?i)sasl[\s\S]{0,80}?password["']?\s*[:=]\s*["']([^"'\s]{6,})["']'''
+secretGroup = 1
+keywords = ["sasl"]
+
+# --------------------------------------------------------------------------------------
+# Excepciones (falsos positivos conocidos). Mantener esta lista lo más corta posible.
+# --------------------------------------------------------------------------------------
+
+[[allowlists]]
+description = "Archivos generados o de terceros que no contienen secretos del proyecto"
+paths = [
+  '''(^|/)node_modules/''',
+  '''(^|/)coverage/''',
+  '''(^|/)junit/''',
+  '''(^|/)package-lock\.json$''',
+  '''\.docx$''',
+  '''\.pdf$''',
+]
