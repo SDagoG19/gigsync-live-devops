@@ -1,27 +1,36 @@
 # ======================================================================================
-# Azure DevOps CI/CD Pipeline - GigSync Live
-# Asignatura: Arquitectura de Software II - ITM
-# Caso de Estudio: Plataforma de Booking Musical "GigSync Live"
-# ======================================================================================
-# Este pipeline implementa las 4 validaciones obligatorias de calidad y seguridad:
-#   1. Detección de Secretos y Credenciales Expuestas (Gitleaks)
-#   2. Análisis Estático de Seguridad del Código (SAST - SonarQube / Semgrep)
-#   3. Análisis de Vulnerabilidades en Dependencias (OWASP Dependency-Check - OWASP Top 10)
-#   4. Ejecución de Pruebas Unitarias con Umbral de Cobertura >= 80% (Jest & Cobertura)
+# GigSync Live - Pipeline CI/CD seguro en Azure DevOps
+# Arquitectura de Software II - ITM - Guía 5 (Puntos 1 y 3)
+# Equipo: Sebastián Dávila, Luisa María Puentes Espinosa, Franco Moncayo
+# --------------------------------------------------------------------------------------
+# Flujo (cada stage solo se ejecuta si el anterior terminó en verde):
 #
-# Se activa automáticamente mediante Branch Policies en los tres momentos del flujo:
-#   (1) Feature/*      -> Develop
-#   (2) Develop        -> Integration
-#   (3) Integration    -> Main
+#   [commit/push] -> Stage 1: SecurityGates  -> Stage 2: BuildAndTest -> Stage 3: Deploy
+#                    - Gitleaks                 - npm ci                 - Azure App Service
+#                    - SAST Semgrep             - npm audit              - Smoke test /health
+#                    - OWASP Dependency-Check   - Jest + cobertura 80%   (solo rama main)
+#                                               - Paquete .zip
+#
+# Criterios de fallo (el pipeline se detiene y NO despliega):
+#   - Gitleaks detecta al menos un secreto en el historial de git      -> exit code 1
+#   - Semgrep encuentra un hallazgo (OWASP Top 10, Express, propias)   -> exit code 1
+#   - Dependency-Check detecta una vulnerabilidad con CVSS >= 7.0      -> exit code != 0
+#   - npm audit detecta vulnerabilidades High o Critical               -> exit code != 0
+#   - Falla alguna prueba unitaria o la cobertura baja del 80 %        -> exit code != 0
 # ======================================================================================
 
+name: GigSync-CICD-$(Date:yyyyMMdd)$(Rev:.r)
+
+# Disparador (Punto 3): cualquier commit en cualquier rama ejecuta el pipeline.
 trigger:
+  batch: false
   branches:
     include:
-      - main
-      - integration
-      - develop
+      - '*'
 
+# Validación de Pull Requests:
+#  - Azure Repos: se activa con Branch Policies > Build Validation (este bloque se ignora).
+#  - Repositorio GitHub conectado a Azure Pipelines: este bloque dispara el pipeline en cada PR.
 pr:
   branches:
     include:
@@ -30,211 +39,357 @@ pr:
       - develop
 
 pool:
-  vmImage: 'ubuntu-latest'
+  vmImage: ubuntu-latest
 
 variables:
-  NODE_VERSION: '18.x'
-  MINIMUM_COVERAGE_THRESHOLD: '80'
-  SONAR_PROJECT_KEY: 'gigsync-live'
-  SONAR_PROJECT_NAME: 'GigSync Live'
+  - name: NODE_VERSION
+    value: '22.x'
+  - name: GITLEAKS_VERSION
+    value: '8.30.1'
+  - name: DC_VERSION
+    value: '13.0.0'
+  - name: SEMGREP_VERSION
+    value: '1.186.0'
+  # Umbral CVSS a partir del cual Dependency-Check rompe el pipeline (7.0 = High y Critical)
+  - name: DC_FAIL_ON_CVSS
+    value: '7'
+  - name: COVERAGE_THRESHOLD
+    value: '80'
+  # Mirror público de NVD mantenido por el proyecto Dependency-Check.
+  # Se usa cuando no está configurada la variable secreta NVD_API_KEY.
+  - name: DC_NVD_MIRROR
+    value: 'https://dependency-check.github.io/DependencyCheck_Builder/nvd_cache/nvdcve-{0}.json.gz'
+  - name: DC_DATA_DIR
+    value: '$(Pipeline.Workspace)/.dc-data'
+  # ---------------- Despliegue continuo (CD) en Azure App Service ----------------
+  # Cambiar DEPLOY_ENABLED a 'true' cuando existan la Web App y el Service Connection
+  # (Project Settings > Service connections > Azure Resource Manager). Ver README.md.
+  - name: DEPLOY_ENABLED
+    value: 'false'
+  - name: AZURE_SERVICE_CONNECTION
+    value: 'sc-gigsync-azure'
+  - name: AZURE_WEBAPP_NAME
+    value: 'gigsync-live-ado'
 
 stages:
   # ==================================================================================
-  # STAGE 1: INSPECCIÓN DE SEGURIDAD (SECRET SCANNING & SAST)
+  # STAGE 1 - CONTROLES AUTOMÁTICOS DE SEGURIDAD
   # ==================================================================================
   - stage: SecurityGates
-    displayName: 'Stage 1: Validaciones de Seguridad (Secretos y SAST)'
+    displayName: '1 · Seguridad: Gitleaks + SAST + OWASP Dependency-Check'
     jobs:
-      - job: SecretScanning
-        displayName: '1. Detección de Secretos Expuestos (Gitleaks)'
+      # ------------------------------------------------------------------------------
+      # Control 1: detección de secretos expuestos con Gitleaks
+      # ------------------------------------------------------------------------------
+      - job: Gitleaks
+        displayName: 'Gitleaks · Secretos expuestos'
         steps:
           - checkout: self
             fetchDepth: 0
+            displayName: 'Checkout con historial completo de git'
 
-          - script: |
-              echo "==> Instalando y ejecutando Gitleaks..."
-              wget https://github.com/gitleaks/gitleaks/releases/download/v8.18.2/gitleaks_8.18.2_linux_x64.tar.gz -O gitleaks.tar.gz
-              tar -zxvf gitleaks.tar.gz
-              chmod +x gitleaks
-              ./gitleaks detect --source . --verbose --redact --report-path $(Build.ArtifactStagingDirectory)/gitleaks-report.json
-            displayName: 'Escanear credenciales y secretos con Gitleaks'
-            failOnStderr: false
+          - bash: |
+              set -euo pipefail
+              cd "$(Agent.TempDirectory)"
+              BASE_URL="https://github.com/gitleaks/gitleaks/releases/download/v$(GITLEAKS_VERSION)"
+              FILE="gitleaks_$(GITLEAKS_VERSION)_linux_x64.tar.gz"
+              curl -sSfLO "$BASE_URL/$FILE"
+              curl -sSfLO "$BASE_URL/gitleaks_$(GITLEAKS_VERSION)_checksums.txt"
+              grep " $FILE\$" "gitleaks_$(GITLEAKS_VERSION)_checksums.txt" | sha256sum --check -
+              tar -xzf "$FILE" gitleaks
+              ./gitleaks version
+            displayName: 'Instalar Gitleaks v$(GITLEAKS_VERSION) (verificando checksum)'
 
-          - task: PublishBuildArtifacts@1
-            displayName: 'Publicar Reporte de Secretos'
+          # Se escanea TODO el historial que llega al commit que se está integrando (HEAD).
+          - bash: |
+              set -euo pipefail
+              mkdir -p "$(Build.ArtifactStagingDirectory)/gitleaks"
+              "$(Agent.TempDirectory)/gitleaks" git "$(Build.SourcesDirectory)" \
+                --config "$(Build.SourcesDirectory)/.gitleaks.toml" \
+                --log-opts="--full-history HEAD" \
+                --redact \
+                --verbose \
+                --no-banner \
+                --exit-code 1 \
+                --report-format json \
+                --report-path "$(Build.ArtifactStagingDirectory)/gitleaks/gitleaks-report.json"
+            displayName: 'Escanear historial git con Gitleaks (falla si hay secretos)'
+
+          - bash: |
+              node "$(Build.SourcesDirectory)/scripts/pipeline-summary.js" \
+                --gitleaks "$(Build.ArtifactStagingDirectory)/gitleaks/gitleaks-report.json" \
+                > "$(Agent.TempDirectory)/gitleaks-summary.md"
+              cat "$(Agent.TempDirectory)/gitleaks-summary.md"
+              echo "##vso[task.uploadsummary]$(Agent.TempDirectory)/gitleaks-summary.md"
+            displayName: 'Publicar resumen de Gitleaks'
+            condition: always()
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publicar reporte de Gitleaks'
             condition: always()
             inputs:
-              PathtoPublish: '$(Build.ArtifactStagingDirectory)/gitleaks-report.json'
-              ArtifactName: 'Security-Secret-Reports'
-              publishLocation: 'Container'
+              targetPath: '$(Build.ArtifactStagingDirectory)/gitleaks'
+              artifact: 'gitleaks-report-$(System.JobAttempt)'
 
-      - job: SASTScan
-        displayName: '2. Análisis Estático de Seguridad de Código (SAST)'
+      # ------------------------------------------------------------------------------
+      # Control adicional (viene del Taller 4): análisis estático (SAST) con Semgrep
+      # ------------------------------------------------------------------------------
+      - job: SAST
+        displayName: 'SAST · Semgrep (OWASP Top 10 + reglas propias)'
+        timeoutInMinutes: 20
         steps:
           - checkout: self
 
-          - task: NodeTool@0
-            displayName: 'Configurar Node.js $(NODE_VERSION)'
-            inputs:
-              versionSpec: $(NODE_VERSION)
-
           - task: UsePythonVersion@0
-            displayName: 'Configurar Python 3.11 (requerido por Semgrep)'
+            displayName: 'Usar Python 3.12 (requerido por Semgrep)'
             inputs:
-              versionSpec: '3.11'
+              versionSpec: '3.12'
 
-          - script: |
-              echo "==> Ejecutando escaneo SAST con Semgrep (Reglas OWASP Top 10)..."
-              python -m pip install --upgrade pip semgrep
-              semgrep scan --config auto --json --output $(Build.ArtifactStagingDirectory)/sast-report.json || true
-              semgrep scan --config "p/owasp-top-ten" --error
-            displayName: 'Ejecutar SAST contra OWASP Top 10'
+          - bash: python -m pip install --disable-pip-version-check --quiet "semgrep==$(SEMGREP_VERSION)"
+            displayName: 'Instalar Semgrep $(SEMGREP_VERSION)'
 
-          # Alternativa con extensión oficial de SonarQube / SonarCloud:
-          # - task: SonarQubePrepare@5
-          #   inputs:
-          #     SonarQube: 'SonarQubeServiceConnection'
-          #     scannerMode: 'CLI'
-          #     configMode: 'file'
-          #     configFile: 'sonar-project.properties'
-          # - task: SonarQubeAnalyze@5
-          # - task: SonarQubePublish@5
-          #   inputs:
-          #     pollingTimeoutSec: '300'
+          - bash: |
+              set -euo pipefail
+              mkdir -p "$(Build.ArtifactStagingDirectory)/semgrep"
+              semgrep --version
+              semgrep scan \
+                --config p/owasp-top-ten \
+                --config p/expressjs \
+                --config .semgrep/ \
+                --metrics off \
+                --error \
+                --json-output "$(Build.ArtifactStagingDirectory)/semgrep/semgrep-report.json"
+            displayName: 'Ejecutar Semgrep (falla con cualquier hallazgo)'
 
-          - task: PublishBuildArtifacts@1
-            displayName: 'Publicar Reporte SAST'
+          - bash: |
+              node "$(Build.SourcesDirectory)/scripts/pipeline-summary.js" \
+                --semgrep "$(Build.ArtifactStagingDirectory)/semgrep/semgrep-report.json" \
+                > "$(Agent.TempDirectory)/semgrep-summary.md"
+              cat "$(Agent.TempDirectory)/semgrep-summary.md"
+              echo "##vso[task.uploadsummary]$(Agent.TempDirectory)/semgrep-summary.md"
+            displayName: 'Publicar resumen de Semgrep'
+            condition: always()
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publicar reporte de Semgrep'
             condition: always()
             inputs:
-              PathtoPublish: '$(Build.ArtifactStagingDirectory)/sast-report.json'
-              ArtifactName: 'Security-SAST-Reports'
-              publishLocation: 'Container'
+              targetPath: '$(Build.ArtifactStagingDirectory)/semgrep'
+              artifact: 'semgrep-report-$(System.JobAttempt)'
 
-  # ==================================================================================
-  # STAGE 2: VULNERABILIDADES EN DEPENDENCIAS (OWASP DEPENDENCY-CHECK)
-  # ==================================================================================
-  - stage: DependencySecurity
-    displayName: 'Stage 2: Análisis de Dependencias (OWASP Dependency-Check)'
-    dependsOn: SecurityGates
-    jobs:
+      # ------------------------------------------------------------------------------
+      # Control 2: vulnerabilidades en dependencias con OWASP Dependency-Check
+      # ------------------------------------------------------------------------------
       - job: OWASPDependencyCheck
-        displayName: '3. Auditoría de Vulnerabilidades en Dependencias (OWASP Top 10)'
+        displayName: 'OWASP Dependency-Check · Dependencias vulnerables'
         timeoutInMinutes: 60
         steps:
           - checkout: self
 
-          - task: NodeTool@0
+          - task: JavaToolInstaller@0
+            displayName: 'Usar Java 21 (requerido por Dependency-Check)'
             inputs:
-              versionSpec: $(NODE_VERSION)
+              versionSpec: '21'
+              jdkArchitectureOption: 'x64'
+              jdkSourceOption: 'PreInstalled'
 
-          - script: |
-              echo "==> Instalando dependencias del proyecto..."
-              npm ci || npm install
-              echo "==> Ejecutando auditoría de vulnerabilidades en paquetes npm..."
-              npm audit --audit-level=high --json > $(Build.ArtifactStagingDirectory)/npm-audit.json || true
-            displayName: 'Auditoría npm audit (Nivel High / Critical)'
+          - bash: echo "##vso[task.setvariable variable=DC_CACHE_DAY]$(date -u +%Y-%m-%d)"
+            displayName: 'Calcular clave diaria de caché NVD'
 
-          - script: |
-              echo "==> Ejecutando OWASP Dependency-Check CLI..."
-              # Descarga y ejecución de OWASP Dependency Check
-              DC_VERSION="12.1.0"
-              REPORT_DIR="$(Build.ArtifactStagingDirectory)/dependency-check-report"
-              mkdir -p "$REPORT_DIR"
-              wget -q https://github.com/dependency-check/DependencyCheck/releases/download/v${DC_VERSION}/dependency-check-${DC_VERSION}-release.zip -O dc.zip
-              unzip -q dc.zip
-              # Opcional: crear la variable secreta NVD_API_KEY en el pipeline para acelerar la descarga de la base NVD
-              NVD_ARGS=""
-              if [ -n "$NVD_API_KEY" ] && [[ "$NVD_API_KEY" != '$('* ]]; then NVD_ARGS="--nvdApiKey $NVD_API_KEY"; fi
-              ./dependency-check/bin/dependency-check.sh --project "GigSync Live" $NVD_ARGS \
-                --scan . \
-                --exclude "**/node_modules/**" \
-                --format "ALL" \
-                --out "$REPORT_DIR" \
-                --failOnCVSS 7 || echo "##vso[task.logissue type=warning]Dependency-Check terminó con advertencias; revisar el artefacto Security-OWASP-Reports"
-              ls -la "$REPORT_DIR"
-            displayName: 'Ejecutar OWASP Dependency-Check'
+          - task: Cache@2
+            displayName: 'Caché de la base de datos de vulnerabilidades (NVD)'
+            inputs:
+              key: '"owasp-dc" | "$(DC_VERSION)" | "$(Agent.OS)" | "$(DC_CACHE_DAY)"'
+              restoreKeys: |
+                "owasp-dc" | "$(DC_VERSION)" | "$(Agent.OS)"
+              path: '$(DC_DATA_DIR)'
+
+          - bash: |
+              set -euo pipefail
+              cd "$(Agent.TempDirectory)"
+              curl -sSfL -o dependency-check.zip \
+                "https://github.com/dependency-check/DependencyCheck/releases/download/v$(DC_VERSION)/dependency-check-$(DC_VERSION)-release.zip"
+              unzip -q dependency-check.zip
+              ./dependency-check/bin/dependency-check.sh --version
+            displayName: 'Instalar OWASP Dependency-Check v$(DC_VERSION)'
+
+          - bash: |
+              set -uo pipefail
+              OUT="$(Build.ArtifactStagingDirectory)/dependency-check"
+              mkdir -p "$OUT" "$(DC_DATA_DIR)"
+              ARGS=(
+                --project "GigSync Live"
+                --scan "$(Build.SourcesDirectory)"
+                --exclude "**/node_modules/**"
+                --exclude "**/.git/**"
+                --exclude "**/coverage/**"
+                --exclude "**/*.docx"
+                --data "$(DC_DATA_DIR)"
+                --out "$OUT"
+                --format HTML --format JSON --format JUNIT
+                --failOnCVSS "$(DC_FAIL_ON_CVSS)"
+                --junitFailOnCVSS "$(DC_FAIL_ON_CVSS)"
+                --suppression "$(Build.SourcesDirectory)/dependency-check-suppressions.xml"
+                --disableOssIndex
+              )
+              # Si la variable secreta no existe, Azure entrega el texto literal "$(NVD_API_KEY)".
+              case "${NVD_API_KEY:-}" in
+                ""|*NVD_API_KEY*)
+                  echo "##vso[task.logissue type=warning]NVD_API_KEY no configurada: se usa el mirror público de NVD de Dependency-Check."
+                  ARGS+=(--nvdDatafeed "$(DC_NVD_MIRROR)")
+                  ;;
+                *)
+                  echo "Usando la API oficial de NVD (variable secreta NVD_API_KEY)."
+                  ARGS+=(--nvdApiKey "$NVD_API_KEY")
+                  ;;
+              esac
+              "$(Agent.TempDirectory)/dependency-check/bin/dependency-check.sh" "${ARGS[@]}"
+            displayName: 'Ejecutar OWASP Dependency-Check (falla con CVSS >= $(DC_FAIL_ON_CVSS))'
             env:
               NVD_API_KEY: $(NVD_API_KEY)
 
-          - task: PublishBuildArtifacts@1
-            displayName: 'Publicar Reportes de Dependencias OWASP'
-            condition: always()
-            inputs:
-              PathtoPublish: '$(Build.ArtifactStagingDirectory)/dependency-check-report'
-              ArtifactName: 'Security-OWASP-Reports'
-              publishLocation: 'Container'
-
-  # ==================================================================================
-  # STAGE 3: PRUEBAS UNITARIAS Y UMBRAL DE COBERTURA (QUALITY GATE)
-  # ==================================================================================
-  - stage: UnitTestsAndQuality
-    displayName: 'Stage 3: Pruebas Unitarias y Cobertura (Threshold >= 80%)'
-    dependsOn: DependencySecurity
-    jobs:
-      - job: JestTestingAndCoverage
-        displayName: '4. Pruebas Unitarias Jest y Medición de Cobertura'
-        steps:
-          - checkout: self
-
-          - task: NodeTool@0
-            inputs:
-              versionSpec: $(NODE_VERSION)
-
-          - script: |
-              echo "==> Instalando paquetes..."
-              npm ci || npm install
-              echo "==> Ejecutando pruebas unitarias con Jest y reporte Cobertura..."
-              npm test -- --ci --coverage --reporters=default --reporters=jest-junit
-            displayName: 'Ejecutar Pruebas Unitarias con Jest'
-            env:
-              JEST_JUNIT_OUTPUT_DIR: '$(Build.SourcesDirectory)/junit'
-              JEST_JUNIT_OUTPUT_NAME: 'junit.xml'
-
           - task: PublishTestResults@2
-            displayName: 'Publicar Resultados de Pruebas Unitarias en Azure DevOps'
+            displayName: 'Publicar resultados de Dependency-Check (pestaña Tests)'
             condition: succeededOrFailed()
             inputs:
               testResultsFormat: 'JUnit'
-              testResultsFiles: '**/junit.xml'
-              searchFolder: '$(Build.SourcesDirectory)'
-              mergeTestResults: true
-              testRunTitle: 'Resultados Pruebas Unitarias GigSync Live'
+              testResultsFiles: '$(Build.ArtifactStagingDirectory)/dependency-check/dependency-check-junit.xml'
+              testRunTitle: 'OWASP Dependency-Check'
+              failTaskOnMissingResultsFile: false
+
+          - bash: |
+              node "$(Build.SourcesDirectory)/scripts/pipeline-summary.js" \
+                --dc "$(Build.ArtifactStagingDirectory)/dependency-check/dependency-check-report.json" \
+                --threshold "$(DC_FAIL_ON_CVSS)" \
+                > "$(Agent.TempDirectory)/dependency-check-summary.md"
+              cat "$(Agent.TempDirectory)/dependency-check-summary.md"
+              echo "##vso[task.uploadsummary]$(Agent.TempDirectory)/dependency-check-summary.md"
+            displayName: 'Publicar resumen de Dependency-Check'
+            condition: always()
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publicar reporte HTML/JSON de Dependency-Check'
+            condition: always()
+            inputs:
+              targetPath: '$(Build.ArtifactStagingDirectory)/dependency-check'
+              artifact: 'dependency-check-report-$(System.JobAttempt)'
+
+  # ==================================================================================
+  # STAGE 2 - INTEGRACIÓN CONTINUA: BUILD, PRUEBAS Y EMPAQUETADO
+  # ==================================================================================
+  - stage: BuildAndTest
+    displayName: '2 · CI: Build, pruebas unitarias y cobertura'
+    dependsOn: SecurityGates
+    jobs:
+      - job: BuildTest
+        displayName: 'Build + npm audit + Jest (cobertura >= $(COVERAGE_THRESHOLD)%)'
+        steps:
+          - checkout: self
+
+          - task: UseNode@1
+            displayName: 'Usar Node.js $(NODE_VERSION)'
+            inputs:
+              version: '$(NODE_VERSION)'
+
+          - script: npm ci
+            displayName: 'Instalar dependencias (npm ci)'
+
+          - script: npm audit --audit-level=high
+            displayName: 'npm audit (falla con vulnerabilidades High/Critical)'
+
+          - script: npm run test:ci
+            displayName: 'Pruebas unitarias Jest + umbral de cobertura $(COVERAGE_THRESHOLD)%'
+
+          - task: PublishTestResults@2
+            displayName: 'Publicar resultados de pruebas (pestaña Tests)'
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFormat: 'JUnit'
+              testResultsFiles: 'junit/junit.xml'
+              testRunTitle: 'Jest - GigSync Live'
+              failTaskOnMissingResultsFile: true
 
           - task: PublishCodeCoverageResults@2
-            displayName: 'Publicar Cobertura de Código en Azure DevOps'
+            displayName: 'Publicar cobertura de código (pestaña Code Coverage)'
             condition: succeededOrFailed()
             inputs:
               summaryFileLocation: '$(Build.SourcesDirectory)/coverage/cobertura-coverage.xml'
               failIfCoverageEmpty: true
 
-          - script: |
-              echo "==> Verificando umbral mínimo de cobertura (>= $(MINIMUM_COVERAGE_THRESHOLD)%)..."
-              node -e "
-                const fs = require('fs');
-                const summaryPath = './coverage/coverage-summary.json';
-                if (!fs.existsSync(summaryPath)) {
-                  console.error('Error: Archivo coverage-summary.json no encontrado.');
-                  process.exit(1);
-                }
-                const summary = JSON.parse(fs.readFileSync(summaryPath, 'utf8'));
-                const linesPct = summary.total.lines.pct;
-                const statementsPct = summary.total.statements.pct;
-                const functionsPct = summary.total.functions.pct;
-                const branchesPct = summary.total.branches.pct;
-                console.log('Resultados de Cobertura Obtenidos:');
-                console.log(' - Líneas:      ' + linesPct + '%');
-                console.log(' - Sentencias:  ' + statementsPct + '%');
-                console.log(' - Funciones:   ' + functionsPct + '%');
-                console.log(' - Ramas:       ' + branchesPct + '%');
-                
-                const threshold = parseFloat(process.env.MINIMUM_COVERAGE_THRESHOLD);
-                if (linesPct < threshold || statementsPct < threshold || functionsPct < threshold) {
-                  console.error('FALLO DE QUALITY GATE: Cobertura inferior al ' + threshold + '% requerido.');
-                  process.exit(1);
-                } else {
-                  console.log('EXITO: La cobertura cumple y supera el umbral estipulado (' + threshold + '%).');
-                }
-              "
-            displayName: 'Verificar Umbral Estricto de Cobertura (Gate)'
-            env:
-              MINIMUM_COVERAGE_THRESHOLD: $(MINIMUM_COVERAGE_THRESHOLD)
+          - bash: |
+              node scripts/pipeline-summary.js \
+                --coverage coverage/coverage-summary.json \
+                --threshold "$(COVERAGE_THRESHOLD)" > "$(Agent.TempDirectory)/coverage-summary.md"
+              cat "$(Agent.TempDirectory)/coverage-summary.md"
+              echo "##vso[task.uploadsummary]$(Agent.TempDirectory)/coverage-summary.md"
+            displayName: 'Publicar resumen de cobertura'
+            condition: succeededOrFailed()
+
+          - bash: |
+              set -euo pipefail
+              APP_DIR="$(Agent.TempDirectory)/app"
+              mkdir -p "$APP_DIR"
+              cp -r src package.json package-lock.json "$APP_DIR/"
+              cd "$APP_DIR"
+              npm ci --omit=dev --ignore-scripts
+            displayName: 'Preparar paquete de despliegue (solo dependencias de producción)'
+
+          - task: ArchiveFiles@2
+            displayName: 'Comprimir paquete .zip'
+            inputs:
+              rootFolderOrFile: '$(Agent.TempDirectory)/app'
+              includeRootFolder: false
+              archiveType: 'zip'
+              archiveFile: '$(Build.ArtifactStagingDirectory)/drop/gigsync-live-$(Build.BuildId).zip'
+              replaceExistingArchive: true
+
+          - task: PublishPipelineArtifact@1
+            displayName: 'Publicar artefacto de despliegue (drop)'
+            inputs:
+              targetPath: '$(Build.ArtifactStagingDirectory)/drop'
+              artifact: 'drop'
+
+  # ==================================================================================
+  # STAGE 3 - DESPLIEGUE CONTINUO EN AZURE APP SERVICE (solo rama main)
+  # ==================================================================================
+  - ${{ if eq(variables.DEPLOY_ENABLED, 'true') }}:
+      - stage: Deploy
+        displayName: '3 · CD: Despliegue en Azure App Service'
+        dependsOn: BuildAndTest
+        condition: and(succeeded(), eq(variables['Build.SourceBranch'], 'refs/heads/main'))
+        jobs:
+          - deployment: DeployWebApp
+            displayName: 'Desplegar GigSync Live en App Service'
+            environment: 'gigsync-production'
+            strategy:
+              runOnce:
+                deploy:
+                  steps:
+                    - task: AzureWebApp@1
+                      name: DeployApp
+                      displayName: 'Azure Web App Deploy: $(AZURE_WEBAPP_NAME)'
+                      inputs:
+                        azureSubscription: '${{ variables.AZURE_SERVICE_CONNECTION }}'
+                        appType: 'webAppLinux'
+                        appName: '$(AZURE_WEBAPP_NAME)'
+                        package: '$(Pipeline.Workspace)/drop/gigsync-live-$(Build.BuildId).zip'
+                        runtimeStack: 'NODE|22-lts'
+                        startUpCommand: 'npm start'
+                        appSettings: '-NODE_ENV production -SCM_DO_BUILD_DURING_DEPLOYMENT false'
+
+                    - bash: |
+                        set -uo pipefail
+                        APP_URL="$(DeployApp.AppServiceApplicationUrl)"
+                        echo "URL de la aplicación: $APP_URL"
+                        for attempt in {1..10}; do
+                          if curl -fsS --max-time 20 "$APP_URL/health"; then
+                            echo ""
+                            echo "Smoke test OK: la aplicación responde en $APP_URL/health"
+                            exit 0
+                          fi
+                          echo "Intento $attempt/10 sin respuesta; reintentando en 20 s..."
+                          sleep 20
+                        done
+                        echo "##vso[task.logissue type=error]La aplicación no respondió en /health"
+                        exit 1
+                      displayName: 'Smoke test: GET /health'

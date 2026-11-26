@@ -1,0 +1,338 @@
+# ======================================================================================
+# GigSync Live - Pipeline CI/CD seguro en GitHub Actions
+# Arquitectura de Software II - ITM - Guía 5 (Puntos 2 y 3)
+# Equipo: Sebastián Dávila, Luisa María Puentes Espinosa, Franco Moncayo
+# --------------------------------------------------------------------------------------
+# Flujo (cada job solo se ejecuta si los anteriores terminaron en verde):
+#
+#   [push / PR] -> gitleaks ─────────┐
+#                  sast (Semgrep) ───┼─> build-test -> deploy (solo main + Azure configurado)
+#                  dependency-check ─┘
+#
+# Criterios de fallo (el workflow se detiene y NO despliega):
+#   - Gitleaks detecta al menos un secreto en el historial de git      -> exit code 1
+#   - Semgrep encuentra un hallazgo (OWASP Top 10, Express, propias)   -> exit code 1
+#   - Dependency-Check detecta una vulnerabilidad con CVSS >= 7.0      -> exit code != 0
+#   - npm audit detecta vulnerabilidades High o Critical               -> exit code != 0
+#   - Falla alguna prueba unitaria o la cobertura baja del 80 %        -> exit code != 0
+#
+# Las acciones se referencian por SHA completo (no por tag) para evitar ataques de cadena
+# de suministro; Dependabot (.github/dependabot.yml) propone las actualizaciones.
+# ======================================================================================
+
+name: GigSync Live CI/CD
+
+# Disparador (Punto 3): cada push a cualquier rama y cada Pull Request hacia las ramas principales.
+on:
+  push:
+    branches: ['**']
+  pull_request:
+    branches: [main, integration, develop]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  NODE_VERSION: '22'
+  GITLEAKS_VERSION: '8.30.1'
+  DC_VERSION: '13.0.0'
+  SEMGREP_VERSION: '1.186.0'
+  DC_FAIL_ON_CVSS: '7'
+  COVERAGE_THRESHOLD: '80'
+  # Mirror público de NVD mantenido por el proyecto Dependency-Check (se usa si no hay NVD_API_KEY)
+  DC_NVD_MIRROR: 'https://dependency-check.github.io/DependencyCheck_Builder/nvd_cache/nvdcve-{0}.json.gz'
+
+jobs:
+  # ------------------------------------------------------------------------------------
+  # Control 1: detección de secretos expuestos con Gitleaks
+  # ------------------------------------------------------------------------------------
+  gitleaks:
+    name: Gitleaks (secretos expuestos)
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout con historial completo de git
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+
+      - name: Instalar Gitleaks v${{ env.GITLEAKS_VERSION }} (verificando checksum)
+        run: |
+          set -euo pipefail
+          mkdir -p "$RUNNER_TEMP/gitleaks"
+          cd "$RUNNER_TEMP/gitleaks"
+          BASE_URL="https://github.com/gitleaks/gitleaks/releases/download/v${GITLEAKS_VERSION}"
+          FILE="gitleaks_${GITLEAKS_VERSION}_linux_x64.tar.gz"
+          curl -sSfLO "$BASE_URL/$FILE"
+          curl -sSfLO "$BASE_URL/gitleaks_${GITLEAKS_VERSION}_checksums.txt"
+          grep " $FILE\$" "gitleaks_${GITLEAKS_VERSION}_checksums.txt" | sha256sum --check -
+          tar -xzf "$FILE" gitleaks
+          echo "$RUNNER_TEMP/gitleaks" >> "$GITHUB_PATH"
+
+      # Se escanea TODO el historial que llega al commit que se está integrando (HEAD).
+      - name: Escanear historial git con Gitleaks (falla si hay secretos)
+        run: |
+          gitleaks version
+          gitleaks git . \
+            --config .gitleaks.toml \
+            --log-opts="--full-history HEAD" \
+            --redact \
+            --verbose \
+            --no-banner \
+            --exit-code 1 \
+            --report-format json \
+            --report-path "$RUNNER_TEMP/gitleaks-report.json"
+
+      - name: Publicar resumen de Gitleaks
+        if: always()
+        run: node scripts/pipeline-summary.js --gitleaks "$RUNNER_TEMP/gitleaks-report.json" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Subir reporte de Gitleaks
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: gitleaks-report
+          path: ${{ runner.temp }}/gitleaks-report.json
+          if-no-files-found: ignore
+          overwrite: true
+
+  # ------------------------------------------------------------------------------------
+  # Control adicional (viene del Taller 4): análisis estático (SAST) con Semgrep
+  # ------------------------------------------------------------------------------------
+  sast:
+    name: SAST (Semgrep)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Usar Python 3.12 (requerido por Semgrep)
+        uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
+        with:
+          python-version: '3.12'
+
+      - name: Instalar Semgrep ${{ env.SEMGREP_VERSION }}
+        run: python -m pip install --disable-pip-version-check --quiet "semgrep==${SEMGREP_VERSION}"
+
+      - name: Ejecutar Semgrep (falla con cualquier hallazgo)
+        run: |
+          semgrep --version
+          semgrep scan \
+            --config p/owasp-top-ten \
+            --config p/expressjs \
+            --config .semgrep/ \
+            --metrics off \
+            --error \
+            --json-output "$RUNNER_TEMP/semgrep-report.json"
+
+      - name: Publicar resumen de Semgrep
+        if: always()
+        run: node scripts/pipeline-summary.js --semgrep "$RUNNER_TEMP/semgrep-report.json" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Subir reporte de Semgrep
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: semgrep-report
+          path: ${{ runner.temp }}/semgrep-report.json
+          if-no-files-found: ignore
+          overwrite: true
+
+  # ------------------------------------------------------------------------------------
+  # Control 2: vulnerabilidades en dependencias con OWASP Dependency-Check
+  # ------------------------------------------------------------------------------------
+  dependency-check:
+    name: OWASP Dependency-Check (dependencias)
+    runs-on: ubuntu-latest
+    timeout-minutes: 60
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Usar Java 21 (requerido por Dependency-Check)
+        uses: actions/setup-java@d1374f8ac74474200d16ef8ecee22c7ae7a51880 # v6.3.0
+        with:
+          distribution: temurin
+          java-version: '21'
+
+      - name: Calcular clave diaria y carpeta de caché NVD
+        id: cache-key
+        run: |
+          echo "day=$(date -u +%Y-%m-%d)" >> "$GITHUB_OUTPUT"
+          echo "DC_DATA_DIR=$HOME/.dc-data" >> "$GITHUB_ENV"
+
+      - name: Caché de la base de datos de vulnerabilidades (NVD)
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ env.DC_DATA_DIR }}
+          key: owasp-dc-${{ env.DC_VERSION }}-${{ runner.os }}-${{ steps.cache-key.outputs.day }}
+          restore-keys: |
+            owasp-dc-${{ env.DC_VERSION }}-${{ runner.os }}-
+
+      - name: Instalar OWASP Dependency-Check v${{ env.DC_VERSION }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          curl -sSfL -o dependency-check.zip \
+            "https://github.com/dependency-check/DependencyCheck/releases/download/v${DC_VERSION}/dependency-check-${DC_VERSION}-release.zip"
+          unzip -q dependency-check.zip
+          ./dependency-check/bin/dependency-check.sh --version
+
+      - name: Ejecutar OWASP Dependency-Check (falla con CVSS >= ${{ env.DC_FAIL_ON_CVSS }})
+        env:
+          NVD_API_KEY: ${{ secrets.NVD_API_KEY }}
+        run: |
+          set -uo pipefail
+          mkdir -p dependency-check-report "$DC_DATA_DIR"
+          ARGS=(
+            --project "GigSync Live"
+            --scan .
+            --exclude "**/node_modules/**"
+            --exclude "**/.git/**"
+            --exclude "**/coverage/**"
+            --exclude "**/*.docx"
+            --data "$DC_DATA_DIR"
+            --out dependency-check-report
+            --format HTML --format JSON --format JUNIT --format SARIF
+            --failOnCVSS "$DC_FAIL_ON_CVSS"
+            --junitFailOnCVSS "$DC_FAIL_ON_CVSS"
+            --suppression dependency-check-suppressions.xml
+            --disableOssIndex
+          )
+          if [ -n "${NVD_API_KEY:-}" ]; then
+            echo "Usando la API oficial de NVD (secreto NVD_API_KEY)."
+            ARGS+=(--nvdApiKey "$NVD_API_KEY")
+          else
+            echo "::warning title=NVD_API_KEY::Secreto NVD_API_KEY no configurado: se usa el mirror público de NVD de Dependency-Check."
+            ARGS+=(--nvdDatafeed "$DC_NVD_MIRROR")
+          fi
+          "$RUNNER_TEMP/dependency-check/bin/dependency-check.sh" "${ARGS[@]}"
+
+      - name: Publicar resumen de Dependency-Check
+        if: always()
+        run: |
+          node scripts/pipeline-summary.js \
+            --dc dependency-check-report/dependency-check-report.json \
+            --threshold "$DC_FAIL_ON_CVSS" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Subir reporte de Dependency-Check
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: dependency-check-report
+          path: dependency-check-report/
+          if-no-files-found: ignore
+          overwrite: true
+
+  # ------------------------------------------------------------------------------------
+  # Integración continua: build, auditoría npm, pruebas y empaquetado
+  # ------------------------------------------------------------------------------------
+  build-test:
+    name: Build y pruebas (Jest + cobertura)
+    needs: [gitleaks, sast, dependency-check]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+
+      - name: Usar Node.js ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+
+      - name: Instalar dependencias (npm ci)
+        run: npm ci
+
+      - name: npm audit (falla con vulnerabilidades High/Critical)
+        run: npm audit --audit-level=high
+
+      - name: Pruebas unitarias Jest + umbral de cobertura ${{ env.COVERAGE_THRESHOLD }}%
+        run: npm run test:ci
+
+      - name: Publicar resumen de cobertura
+        if: success() || failure()
+        run: |
+          node scripts/pipeline-summary.js \
+            --coverage coverage/coverage-summary.json \
+            --threshold "$COVERAGE_THRESHOLD" >> "$GITHUB_STEP_SUMMARY"
+
+      - name: Subir resultados de pruebas y cobertura
+        if: success() || failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: test-results
+          path: |
+            junit/
+            coverage/
+          if-no-files-found: ignore
+          overwrite: true
+
+      - name: Preparar paquete de despliegue (solo dependencias de producción)
+        run: |
+          set -euo pipefail
+          mkdir -p dist/app
+          cp -r src package.json package-lock.json dist/app/
+          cd dist/app
+          npm ci --omit=dev --ignore-scripts
+          zip -qr ../gigsync-live.zip .
+
+      - name: Subir artefacto de despliegue
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: app-package
+          path: dist/gigsync-live.zip
+          if-no-files-found: error
+          overwrite: true
+
+  # ------------------------------------------------------------------------------------
+  # Despliegue continuo en Azure App Service (solo rama main y si Azure está configurado)
+  # Requiere: variable de repositorio AZURE_WEBAPP_NAME y secreto AZURE_WEBAPP_PUBLISH_PROFILE
+  # ------------------------------------------------------------------------------------
+  deploy:
+    name: Deploy en Azure App Service
+    needs: build-test
+    if: >-
+      github.ref == 'refs/heads/main' &&
+      (github.event_name == 'push' || github.event_name == 'workflow_dispatch') &&
+      vars.AZURE_WEBAPP_NAME != ''
+    runs-on: ubuntu-latest
+    environment:
+      name: production
+      url: ${{ steps.deploy.outputs.webapp-url }}
+    steps:
+      - name: Descargar artefacto de despliegue
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: app-package
+
+      - name: Desplegar en Azure Web App
+        id: deploy
+        uses: azure/webapps-deploy@02a81bead70021f5284939794bcec79c271ab383 # v3.0.8
+        with:
+          app-name: ${{ vars.AZURE_WEBAPP_NAME }}
+          publish-profile: ${{ secrets.AZURE_WEBAPP_PUBLISH_PROFILE }}
+          package: gigsync-live.zip
+
+      - name: 'Smoke test: GET /health'
+        env:
+          APP_URL: ${{ steps.deploy.outputs.webapp-url }}
+        run: |
+          set -uo pipefail
+          echo "URL de la aplicación: $APP_URL"
+          for attempt in {1..10}; do
+            if curl -fsS --max-time 20 "$APP_URL/health"; then
+              echo ""
+              echo "Smoke test OK: la aplicación responde en $APP_URL/health"
+              exit 0
+            fi
+            echo "Intento $attempt/10 sin respuesta; reintentando en 20 s..."
+            sleep 20
+          done
+          echo "::error::La aplicación no respondió en /health"
+          exit 1

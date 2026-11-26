@@ -1,21 +1,30 @@
 # Dependencies
+# IMPORTANTE: package-lock.json SÍ se versiona. Lo necesitan `npm ci` en el pipeline
+# y OWASP Dependency-Check para analizar el árbol exacto de dependencias.
 node_modules/
-package-lock.json
 
 # Test Coverage & Reports
 coverage/
 junit/
-*.xml
 *-report.json
+*-report.sarif
 dependency-check-report/
+gitleaks-report.*
+
+# Build / deploy artifacts
+dist/
+*.zip
+.dc-data/
 
 # Logs & Environment
 *.log
 .env
-.env.local
+.env.*
+!.env.example
 
 # IDE & OS
 .vscode/
 .idea/
 .DS_Store
 Thumbs.db
+~$*.docx
